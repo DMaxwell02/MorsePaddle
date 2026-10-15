@@ -24,23 +24,47 @@ pytest
 The simulator prints every raw edge, rejected bounce transition, accepted symbol, and decoded
 character. The final line shows the decoded message and bounce count.
 
-## Find and monitor the USB HID interface
+## Monitor the hamradio.solutions PaddleAdapter on Windows
 
-List connected HID devices:
-
-```powershell
-morse-paddle devices
-```
-
-Then listen using the interface's hexadecimal vendor and product IDs:
+The PaddleAdapter (`VID 0x04D8`, `PID 0x01A6`) can expose several HID collections. Windows
+normally reserves keyboard and mouse collections, and opening one of those through hidapi can
+produce `OSError: read error`. First list only the PaddleAdapter collections:
 
 ```powershell
-morse-paddle listen --vid 0x04D8 --pid 0x01A6 --byte-index 0 --dit-mask 0x01 --dah-mask 0x02
+morse-paddle devices --vid 0x04D8 --pid 0x01A6
 ```
+
+Each entry includes its collection index, exact HID path, usage page, usage, and interface number.
+The listener automatically skips keyboard/mouse collections and probes the remaining collections
+in a deterministic order. Start capture with:
+
+```powershell
+morse-paddle listen --vid 0x04D8 --pid 0x01A6 --capture captures\paddle.jsonl
+```
+
+If automatic selection cannot identify a readable collection, select the index from the filtered
+`devices` output:
+
+```powershell
+morse-paddle listen --vid 0x04D8 --pid 0x01A6 --collection 1 --capture captures\paddle.jsonl
+```
+
+For an exact, stable selection, copy the complete `path=` value and wrap it in single quotes.
+Single quotes are important because Windows HID paths contain PowerShell metacharacters such as
+`&`. For example:
+
+```powershell
+morse-paddle listen --vid 0x04D8 --pid 0x01A6 --path '\\?\hid#vid_04d8&pid_01a6&mi_01&col02#...' --capture captures\paddle.jsonl
+```
+
+Use the path printed on your machine; do not type the abbreviated example literally. If every
+collection is a keyboard or mouse collection, Windows may prevent hidapi from reading the device.
+Close VBand, keyer utilities, browser tabs, or other software that may have exclusive use of the
+paddle and retry. The CLI reports this limitation without a Python traceback.
 
 The default report mapping treats bit 0 as dit and bit 1 as dah. Adjust `--byte-index`,
 `--dit-mask`, and `--dah-mask` to match the interface. Add `--invert` if the contacts are
-active-low. Use `--capture captures\session.jsonl` to preserve reports for later analysis.
+active-low. Missing capture parent directories are created automatically.
 
 The debounce window defaults to 5 ms. Compare runs with `--debounce-ms 2`, `5`, and `10` to
 measure whether apparent extra events are contact bounce or originate in the USB interface.
@@ -69,4 +93,3 @@ presses become dots or dashes; elapsed time between presses determines letter an
 
 For definitive timing analysis, use a raw capture and confirm the HID report mapping before
 drawing conclusions about the mechanical contacts.
-

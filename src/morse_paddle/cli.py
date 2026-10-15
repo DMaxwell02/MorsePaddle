@@ -1,13 +1,14 @@
 import argparse
 import json
-from collections.abc import Iterable
-from contextlib import nullcontext
+import sys
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TextIO
 
 from morse_paddle.debounce import PaddleDebouncer
 from morse_paddle.decoder import MorseDecoder
-from morse_paddle.hid_source import list_devices, read_device
+from morse_paddle.hid_source import HIDError, list_devices, read_device
 from morse_paddle.models import RawSample
 from morse_paddle.simulator import samples_for_text
 
@@ -20,7 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Morse Paddle USB interface diagnostics")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("devices", help="list connected HID devices")
+    devices = subparsers.add_parser("devices", help="list connected HID collections")
+    devices.add_argument("--vid", type=_number, default=0, help="filter by vendor ID")
+    devices.add_argument("--pid", type=_number, default=0, help="filter by product ID")
 
     simulate = subparsers.add_parser("simulate", help="analyze generated paddle input")
     simulate.add_argument("--text", default="SOS TEST", help="text to generate")
@@ -34,6 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--dit-mask", type=_number, default=0x01)
     listen.add_argument("--dah-mask", type=_number, default=0x02)
     listen.add_argument("--invert", action="store_true", help="use active-low contact bits")
+    selector = listen.add_mutually_exclusive_group()
+    selector.add_argument(
+        "--path",
+        help="exact HID path printed by `devices` (quote this value in PowerShell)",
+    )
+    selector.add_argument(
+        "--collection",
+        type=int,
+        help="collection index printed by `devices --vid ... --pid ...`",
+    )
     listen.add_argument("--capture", type=Path, help="write raw samples to a JSONL file")
     _add_timing_arguments(listen)
     return parser
@@ -44,42 +57,57 @@ def _add_timing_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--unit-ms", type=float, default=80.0, help="Morse timing unit")
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    if args.command == "devices":
-        _print_devices()
-        return
-
-    if args.command == "simulate":
-        samples = samples_for_text(args.text, args.unit_ms, args.bounce)
-        _analyze(samples, args.debounce_ms, args.unit_ms)
-        return
-
-    samples = read_device(
-        args.vid,
-        args.pid,
-        args.byte_index,
-        args.dit_mask,
-        args.dah_mask,
-        args.invert,
-    )
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     try:
-        _analyze(samples, args.debounce_ms, args.unit_ms, args.capture)
+        if args.command == "devices":
+            _print_devices(args.vid, args.pid)
+            return 0
+
+        if args.command == "simulate":
+            samples = samples_for_text(args.text, args.unit_ms, args.bounce)
+            _analyze(samples, args.debounce_ms, args.unit_ms)
+            return 0
+
+        with read_device(
+            args.vid,
+            args.pid,
+            args.byte_index,
+            args.dit_mask,
+            args.dah_mask,
+            args.invert,
+            path=args.path,
+            collection_index=args.collection,
+        ) as samples:
+            selected = samples.collection
+            print(
+                f"Listening on collection [{selected.index}] "
+                f"usage_page=0x{selected.usage_page:04X} usage=0x{selected.usage:04X} "
+                f"interface={selected.interface_number} path={selected.path_text}"
+            )
+            _analyze(samples, args.debounce_ms, args.unit_ms, args.capture)
     except KeyboardInterrupt:
         print("\nCapture stopped.")
+    except (HIDError, CaptureError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
-def _print_devices() -> None:
-    devices = list_devices()
+def _print_devices(vendor_id: int = 0, product_id: int = 0) -> None:
+    devices = list_devices(vendor_id, product_id)
     if not devices:
         print("No HID devices found.")
         return
     for device in devices:
-        vid = int(device.get("vendor_id", 0))
-        pid = int(device.get("product_id", 0))
-        manufacturer = device.get("manufacturer_string") or "Unknown manufacturer"
-        product = device.get("product_string") or "Unknown product"
-        print(f"VID=0x{vid:04X} PID=0x{pid:04X}  {manufacturer} - {product}")
+        print(
+            f"[{device.index}] VID=0x{device.vendor_id:04X} PID=0x{device.product_id:04X} "
+            f"usage_page=0x{device.usage_page:04X} usage=0x{device.usage:04X} "
+            f"interface={device.interface_number}"
+        )
+        print(f"    {device.manufacturer} - {device.product}")
+        print(f"    path={device.path_text}")
 
 
 def _analyze(
@@ -92,9 +120,7 @@ def _analyze(
     decoder = MorseDecoder(unit_ms)
     first_timestamp: int | None = None
 
-    capture_context = (
-        capture_path.open("w", encoding="utf-8") if capture_path else nullcontext(None)
-    )
+    capture_context = _capture_file(capture_path) if capture_path else nullcontext(None)
     with capture_context as capture:
         for sample in samples:
             if first_timestamp is None:
@@ -128,15 +154,37 @@ def _analyze(
 def _write_capture(capture: TextIO | None, sample: RawSample, elapsed_ms: float) -> None:
     if capture is None:
         return
-    json.dump(
-        {
-            "elapsed_ms": round(elapsed_ms, 6),
-            "timestamp_ns": sample.timestamp_ns,
-            "dit_pressed": sample.dit_pressed,
-            "dah_pressed": sample.dah_pressed,
-            "report_hex": sample.report.hex(),
-        },
-        capture,
-    )
-    capture.write("\n")
+    try:
+        json.dump(
+            {
+                "elapsed_ms": round(elapsed_ms, 6),
+                "timestamp_ns": sample.timestamp_ns,
+                "dit_pressed": sample.dit_pressed,
+                "dah_pressed": sample.dah_pressed,
+                "report_hex": sample.report.hex(),
+            },
+            capture,
+        )
+        capture.write("\n")
+    except OSError as exc:
+        raise CaptureError(f"Could not write capture data: {exc}") from exc
 
+
+class CaptureError(RuntimeError):
+    """A capture file could not be created."""
+
+
+@contextmanager
+def _capture_file(capture_path: Path) -> Iterator[TextIO]:
+    try:
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+        capture = capture_path.open("w", encoding="utf-8")
+    except OSError as exc:
+        raise CaptureError(f"Could not create capture file {capture_path}: {exc}") from exc
+    try:
+        yield capture
+    finally:
+        try:
+            capture.close()
+        except OSError as exc:
+            raise CaptureError(f"Could not close capture file {capture_path}: {exc}") from exc
