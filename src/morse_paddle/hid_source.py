@@ -274,5 +274,6 @@ def _access_error(action: str, collection: HIDCollection, error: OSError) -> str
         f"Could not {action} HID collection [{collection.index}] at {collection.path_text!r}: "
         f"{error}. Close other paddle/keyer applications that may have exclusive use and retry. "
         "On Windows, keyboard HID collections may be reserved by the OS; choose a non-keyboard "
-        "path shown by `devices`."
+        "path shown by `devices`. If the path ends in `\\KBD`, use `morse-paddle raw-devices` "
+        "and `morse-paddle raw-listen` instead."
     )

@@ -10,6 +10,16 @@ from morse_paddle.debounce import PaddleDebouncer
 from morse_paddle.decoder import MorseDecoder
 from morse_paddle.hid_source import HIDError, list_devices, read_device
 from morse_paddle.models import RawSample
+from morse_paddle.raw_keyboard import (
+    KeyboardSampleStream,
+    KeyMapping,
+    RawInputError,
+    RawKeyEvent,
+    list_raw_keyboards,
+    select_raw_keyboard,
+    vid_pid_from_path,
+    windows_backend,
+)
 from morse_paddle.simulator import samples_for_text
 
 
@@ -24,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     devices = subparsers.add_parser("devices", help="list connected HID collections")
     devices.add_argument("--vid", type=_number, default=0, help="filter by vendor ID")
     devices.add_argument("--pid", type=_number, default=0, help="filter by product ID")
+
+    raw_devices = subparsers.add_parser(
+        "raw-devices", help="list Windows Raw Input keyboard devices"
+    )
+    raw_devices.add_argument("--vid", type=_number, default=0, help="filter by vendor ID")
+    raw_devices.add_argument("--pid", type=_number, default=0, help="filter by product ID")
 
     simulate = subparsers.add_parser("simulate", help="analyze generated paddle input")
     simulate.add_argument("--text", default="SOS TEST", help="text to generate")
@@ -49,6 +65,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     listen.add_argument("--capture", type=Path, help="write raw samples to a JSONL file")
     _add_timing_arguments(listen)
+
+    raw_listen = subparsers.add_parser(
+        "raw-listen", help="capture a protected Windows keyboard HID through Raw Input"
+    )
+    raw_listen.add_argument("--vid", type=_number, default=0, help="filter by vendor ID")
+    raw_listen.add_argument("--pid", type=_number, default=0, help="filter by product ID")
+    raw_selector = raw_listen.add_mutually_exclusive_group()
+    raw_selector.add_argument(
+        "--path", help="exact device path printed by `raw-devices` (quote in PowerShell)"
+    )
+    raw_selector.add_argument(
+        "--device-index", type=int, help="filtered device index printed by `raw-devices`"
+    )
+    raw_listen.add_argument(
+        "--inspect",
+        action="store_true",
+        help="print raw make/break events without decoding",
+    )
+    raw_listen.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="print raw key events while mapped decoding is active",
+    )
+    dit_mapping = raw_listen.add_mutually_exclusive_group()
+    dit_mapping.add_argument("--dit-scan", type=_number, help="dit scan ID, including E0/E1 prefix")
+    dit_mapping.add_argument("--dit-vkey", type=_number, help="dit virtual-key code")
+    dah_mapping = raw_listen.add_mutually_exclusive_group()
+    dah_mapping.add_argument("--dah-scan", type=_number, help="dah scan ID, including E0/E1 prefix")
+    dah_mapping.add_argument("--dah-vkey", type=_number, help="dah virtual-key code")
+    raw_listen.add_argument("--capture", type=Path, help="write raw key events to a JSONL file")
+    _add_timing_arguments(raw_listen)
     return parser
 
 
@@ -65,9 +112,17 @@ def main(argv: list[str] | None = None) -> int:
             _print_devices(args.vid, args.pid)
             return 0
 
+        if args.command == "raw-devices":
+            _print_raw_devices(args.vid, args.pid)
+            return 0
+
         if args.command == "simulate":
             samples = samples_for_text(args.text, args.unit_ms, args.bounce)
             _analyze(samples, args.debounce_ms, args.unit_ms)
+            return 0
+
+        if args.command == "raw-listen":
+            _raw_listen(args)
             return 0
 
         with read_device(
@@ -89,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             _analyze(samples, args.debounce_ms, args.unit_ms, args.capture)
     except KeyboardInterrupt:
         print("\nCapture stopped.")
-    except (HIDError, CaptureError) as exc:
+    except (HIDError, RawInputError, CaptureError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0
@@ -108,6 +163,96 @@ def _print_devices(vendor_id: int = 0, product_id: int = 0) -> None:
         )
         print(f"    {device.manufacturer} - {device.product}")
         print(f"    path={device.path_text}")
+
+
+def _print_raw_devices(vendor_id: int = 0, product_id: int = 0) -> None:
+    devices = list_raw_keyboards(windows_backend(), vendor_id, product_id)
+    if not devices:
+        print("No matching Raw Input keyboard devices found.")
+        return
+    for device in devices:
+        vid, pid = vid_pid_from_path(device.path)
+        identifiers = (
+            f"VID=0x{vid:04X} PID=0x{pid:04X}"
+            if vid is not None and pid is not None
+            else "VID/PID=unknown"
+        )
+        print(
+            f"[{device.index}] {identifiers} type={device.keyboard_type} "
+            f"subtype={device.keyboard_subtype} keys={device.key_count}"
+        )
+        print(f"    path={device.path}")
+
+
+def _raw_listen(args: argparse.Namespace) -> None:
+    backend = windows_backend()
+    devices = list_raw_keyboards(backend, args.vid, args.pid)
+    selected = select_raw_keyboard(devices, args.path, args.device_index)
+    print(f"Listening through Windows Raw Input on [{selected.index}] path={selected.path}")
+    print("Normal keyboard input is not suppressed. Press Ctrl+C to stop.")
+
+    capture_context = _capture_file(args.capture) if args.capture else nullcontext(None)
+    with capture_context as capture, backend.open(selected) as reader:
+        if args.inspect:
+            while True:
+                event = reader.get(0.1)
+                if event is not None:
+                    _show_raw_event(event)
+                    _write_raw_event(capture, event)
+
+        if (args.dit_scan is None and args.dit_vkey is None) or (
+            args.dah_scan is None and args.dah_vkey is None
+        ):
+            raise RawInputError(
+                "Mapped capture requires one dit and one dah mapping. Run with --inspect first, "
+                "then pass --dit-scan/--dah-scan or --dit-vkey/--dah-vkey."
+            )
+        mapping = KeyMapping(
+            dit_scan=args.dit_scan,
+            dah_scan=args.dah_scan,
+            dit_vkey=args.dit_vkey,
+            dah_vkey=args.dah_vkey,
+        )
+
+        def event_sink(event: RawKeyEvent) -> None:
+            if args.diagnostic:
+                _show_raw_event(event)
+            _write_raw_event(capture, event)
+
+        samples = KeyboardSampleStream(reader, mapping, args.debounce_ms, event_sink)
+        _analyze(samples, args.debounce_ms, args.unit_ms)
+
+
+def _show_raw_event(event: RawKeyEvent) -> None:
+    edge = "MAKE " if event.is_make else "BREAK"
+    print(
+        f"RAWKEY {edge} scan=0x{event.scan_code:04X} scan_id=0x{event.scan_id:04X} "
+        f"vkey=0x{event.virtual_key:04X} e0={int(event.e0)} e1={int(event.e1)}"
+    )
+
+
+def _write_raw_event(capture: TextIO | None, event: RawKeyEvent) -> None:
+    if capture is None:
+        return
+    try:
+        json.dump(
+            {
+                "timestamp_ns": event.timestamp_ns,
+                "device_path": event.device_path,
+                "event": "make" if event.is_make else "break",
+                "scan_code": event.scan_code,
+                "scan_id": event.scan_id,
+                "virtual_key": event.virtual_key,
+                "e0": event.e0,
+                "e1": event.e1,
+                "message": event.message,
+                "extra_information": event.extra_information,
+            },
+            capture,
+        )
+        capture.write("\n")
+    except OSError as exc:
+        raise CaptureError(f"Could not write capture data: {exc}") from exc
 
 
 def _analyze(

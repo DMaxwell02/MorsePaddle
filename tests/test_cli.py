@@ -1,10 +1,12 @@
 from io import StringIO
 from pathlib import Path
+from typing import Self
 
 import pytest
 
 from morse_paddle import cli
 from morse_paddle.hid_source import HIDCollection, HIDError
+from morse_paddle.raw_keyboard import RawKeyboardDevice, RawKeyEvent
 
 
 def paddle_collection() -> HIDCollection:
@@ -77,3 +79,93 @@ def test_capture_write_error_becomes_actionable_error() -> None:
             cli.RawSample(1, False, False, b"\x00"),
             0,
         )
+
+
+def test_raw_devices_prints_filterable_physical_keyboard_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = RawKeyboardDevice(
+        0,
+        10,
+        r"\\?\HID#VID_04D8&PID_01A6#paddle",
+        keyboard_type=4,
+        keyboard_subtype=0,
+        key_count=101,
+    )
+    backend = object()
+    monkeypatch.setattr(cli, "windows_backend", lambda: backend)
+    monkeypatch.setattr(cli, "list_raw_keyboards", lambda api, vid, pid: [device])
+
+    result = cli.main(["raw-devices", "--vid", "0x04D8", "--pid", "0x01A6"])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "[0] VID=0x04D8 PID=0x01A6 type=4 subtype=0 keys=101" in output
+    assert r"path=\\?\HID#VID_04D8&PID_01A6#paddle" in output
+
+
+def test_raw_listen_parser_accepts_extended_scan_mappings() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "raw-listen",
+            "--vid",
+            "0x04D8",
+            "--pid",
+            "0x01A6",
+            "--dit-scan",
+            "0xE01D",
+            "--dah-vkey",
+            "0x27",
+        ]
+    )
+
+    assert args.dit_scan == 0xE01D
+    assert args.dah_vkey == 0x27
+
+
+def test_raw_inspection_stops_cleanly_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = RawKeyboardDevice(0, 10, r"\\?\HID#VID_04D8&PID_01A6#paddle")
+
+    class InterruptingSession:
+        def __init__(self) -> None:
+            self.device = device
+            self.closed = False
+            self.reads = 0
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.closed = True
+
+        def get(self, timeout: float) -> RawKeyEvent | None:
+            self.reads += 1
+            if self.reads > 1:
+                raise KeyboardInterrupt
+            return RawKeyEvent(1, 10, device.path, True, 0x1D, True, False, 0xA3)
+
+    class Backend:
+        def __init__(self) -> None:
+            self.session = InterruptingSession()
+
+        def enumerate(self) -> list[RawKeyboardDevice]:
+            return [device]
+
+        def open(self, selected: RawKeyboardDevice) -> InterruptingSession:
+            assert selected == device
+            return self.session
+
+    backend = Backend()
+    monkeypatch.setattr(cli, "windows_backend", lambda: backend)
+
+    result = cli.main(["raw-listen", "--vid", "0x04D8", "--pid", "0x01A6", "--inspect"])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "RAWKEY MAKE" in output
+    assert "Capture stopped." in output
+    assert backend.session.closed

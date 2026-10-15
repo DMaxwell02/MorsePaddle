@@ -62,6 +62,47 @@ collection is a keyboard or mouse collection, Windows may prevent hidapi from re
 Close VBand, keyer utilities, browser tabs, or other software that may have exclusive use of the
 paddle and retry. The CLI reports this limitation without a Python traceback.
 
+### Capture a protected `\KBD` collection with Windows Raw Input
+
+If the only PaddleAdapter HID path ends in `\KBD`, use the Raw Input backend instead of `listen`.
+Raw Input can attribute keyboard events to the exact physical device even though Windows prevents
+hidapi from opening the keyboard collection.
+
+First discover the Raw Input path:
+
+```powershell
+morse-paddle raw-devices --vid 0x04D8 --pid 0x01A6
+```
+
+Then inspect the make/break events while pressing each paddle:
+
+```powershell
+morse-paddle raw-listen --vid 0x04D8 --pid 0x01A6 --inspect --capture captures\paddle-keys.jsonl
+```
+
+The diagnostic output includes the ordinary scan code, an extended `scan_id`, virtual-key code,
+and E0/E1 flags. Extended scan IDs use `0xE000 | scan` for E0 and `0xE100 | scan` for E1. For
+example, E0 scan code `0x001D` is selected as `0xE01D`.
+
+After identifying the two codes, map them to dit and dah. Replace the example values with those
+reported by `--inspect`:
+
+```powershell
+morse-paddle raw-listen --vid 0x04D8 --pid 0x01A6 --dit-scan 0xE01D --dah-scan 0xE038 --diagnostic --capture captures\paddle-raw.jsonl
+```
+
+Virtual-key mappings are also supported with `--dit-vkey` and `--dah-vkey`. If more than one Raw
+Input keyboard matches, select the filtered index with `--device-index N`, or copy the complete
+path from `raw-devices` and pass it in single quotes:
+
+```powershell
+morse-paddle raw-listen --path '\\?\HID#VID_04D8&PID_01A6#...' --inspect
+```
+
+Raw Input registration **does not suppress normal keystrokes**. Paddle-generated keyboard input
+continues to reach the focused application while it is observed and device-filtered by this tool.
+Press `Ctrl+C` on the regular keyboard to stop the background Windows message loop cleanly.
+
 The default report mapping treats bit 0 as dit and bit 1 as dah. Adjust `--byte-index`,
 `--dit-mask`, and `--dah-mask` to match the interface. Add `--invert` if the contacts are
 active-low. Missing capture parent directories are created automatically.
@@ -80,6 +121,8 @@ src/morse_paddle/
   debounce.py             Per-contact debounce and bounce accounting
   decoder.py              Morse symbol and character translation
   hid_source.py           HID enumeration and report capture
+  raw_keyboard.py         Portable Raw Input device selection and key mapping
+  _win_raw_input.py       Windows ctypes Raw Input discovery and message loop
   simulator.py            Repeatable simulated reports, including contact bounce
 tests/                    Unit tests for decoding and debounce behavior
 ```
