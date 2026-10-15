@@ -103,6 +103,21 @@ Raw Input registration **does not suppress normal keystrokes**. Paddle-generated
 continues to reach the focused application while it is observed and device-filtered by this tool.
 Press `Ctrl+C` on the regular keyboard to stop the background Windows message loop cleanly.
 
+### Generate a 700 Hz sidetone at 15 WPM
+
+The PaddleAdapter emits extended Ctrl (`scan_id 0xE01D`) and non-extended Ctrl (`scan_id 0x001D`).
+Run the fixed-speed tone keyer with:
+
+```powershell
+morse-paddle raw-keyer --vid 0x04D8 --pid 0x01A6 --dit-scan 0xE01D --dah-scan 0x001D --frequency 700 --wpm 15
+```
+
+At 15 WPM, one Morse unit is 80 ms. The keyer generates 80 ms dits, 240 ms dahs, and 80 ms
+inter-element gaps. Holding one paddle repeats that element; holding both alternates dit and dah.
+Taps made during a tone are remembered for the next element. Swap the two scan values if the
+paddles are reversed. Add `--diagnostic` to print Raw Input events or
+`--capture captures\paddle-keyer.jsonl` to log them.
+
 The default report mapping treats bit 0 as dit and bit 1 as dah. Adjust `--byte-index`,
 `--dit-mask`, and `--dah-mask` to match the interface. Add `--invert` if the contacts are
 active-low. Missing capture parent directories are created automatically.
@@ -123,6 +138,7 @@ src/morse_paddle/
   hid_source.py           HID enumeration and report capture
   raw_keyboard.py         Portable Raw Input device selection and key mapping
   _win_raw_input.py       Windows ctypes Raw Input discovery and message loop
+  tone_keyer.py           Fixed-speed paddle timing and Windows tone output
   simulator.py            Repeatable simulated reports, including contact bounce
 tests/                    Unit tests for decoding and debounce behavior
 ```

@@ -124,6 +124,25 @@ def test_raw_listen_parser_accepts_extended_scan_mappings() -> None:
     assert args.dah_vkey == 0x27
 
 
+def test_raw_keyer_defaults_to_700_hz_at_15_wpm() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "raw-keyer",
+            "--vid",
+            "0x04D8",
+            "--pid",
+            "0x01A6",
+            "--dit-scan",
+            "0xE01D",
+            "--dah-scan",
+            "0x001D",
+        ]
+    )
+
+    assert args.frequency == 700
+    assert args.wpm == 15
+
+
 def test_raw_inspection_stops_cleanly_on_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

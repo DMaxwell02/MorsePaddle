@@ -21,6 +21,7 @@ from morse_paddle.raw_keyboard import (
     windows_backend,
 )
 from morse_paddle.simulator import samples_for_text
+from morse_paddle.tone_keyer import PaddleToneKeyer, ToneError, WindowsToneOutput
 
 
 def _number(value: str) -> int:
@@ -96,6 +97,29 @@ def build_parser() -> argparse.ArgumentParser:
     dah_mapping.add_argument("--dah-vkey", type=_number, help="dah virtual-key code")
     raw_listen.add_argument("--capture", type=Path, help="write raw key events to a JSONL file")
     _add_timing_arguments(raw_listen)
+
+    raw_keyer = subparsers.add_parser(
+        "raw-keyer", help="generate fixed-speed tones from a Windows keyboard paddle"
+    )
+    raw_keyer.add_argument("--vid", type=_number, default=0, help="filter by vendor ID")
+    raw_keyer.add_argument("--pid", type=_number, default=0, help="filter by product ID")
+    keyer_selector = raw_keyer.add_mutually_exclusive_group()
+    keyer_selector.add_argument(
+        "--path", help="exact device path printed by `raw-devices` (quote in PowerShell)"
+    )
+    keyer_selector.add_argument(
+        "--device-index", type=int, help="filtered device index printed by `raw-devices`"
+    )
+    keyer_dit = raw_keyer.add_mutually_exclusive_group(required=True)
+    keyer_dit.add_argument("--dit-scan", type=_number, help="dit scan ID, including E0/E1 prefix")
+    keyer_dit.add_argument("--dit-vkey", type=_number, help="dit virtual-key code")
+    keyer_dah = raw_keyer.add_mutually_exclusive_group(required=True)
+    keyer_dah.add_argument("--dah-scan", type=_number, help="dah scan ID, including E0/E1 prefix")
+    keyer_dah.add_argument("--dah-vkey", type=_number, help="dah virtual-key code")
+    raw_keyer.add_argument("--frequency", type=int, default=700, help="tone frequency in Hz")
+    raw_keyer.add_argument("--wpm", type=float, default=15, help="keyer speed")
+    raw_keyer.add_argument("--diagnostic", action="store_true", help="print raw key events")
+    raw_keyer.add_argument("--capture", type=Path, help="write raw key events to a JSONL file")
     return parser
 
 
@@ -125,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
             _raw_listen(args)
             return 0
 
+        if args.command == "raw-keyer":
+            _raw_keyer(args)
+            return 0
+
         with read_device(
             args.vid,
             args.pid,
@@ -144,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             _analyze(samples, args.debounce_ms, args.unit_ms, args.capture)
     except KeyboardInterrupt:
         print("\nCapture stopped.")
-    except (HIDError, RawInputError, CaptureError) as exc:
+    except (HIDError, RawInputError, ToneError, CaptureError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0
@@ -221,6 +249,42 @@ def _raw_listen(args: argparse.Namespace) -> None:
 
         samples = KeyboardSampleStream(reader, mapping, args.debounce_ms, event_sink)
         _analyze(samples, args.debounce_ms, args.unit_ms)
+
+
+def _raw_keyer(args: argparse.Namespace) -> None:
+    backend = windows_backend()
+    devices = list_raw_keyboards(backend, args.vid, args.pid)
+    selected = select_raw_keyboard(devices, args.path, args.device_index)
+    mapping = KeyMapping(
+        dit_scan=args.dit_scan,
+        dah_scan=args.dah_scan,
+        dit_vkey=args.dit_vkey,
+        dah_vkey=args.dah_vkey,
+    )
+    tone = WindowsToneOutput()
+    keyer = PaddleToneKeyer(
+        mapping,
+        tone,
+        frequency_hz=args.frequency,
+        wpm=args.wpm,
+    )
+    print(f"Keying [{selected.index}] through Windows Raw Input: {selected.path}")
+    print(
+        f"Tone={args.frequency} Hz speed={args.wpm:g} WPM "
+        f"unit={keyer.unit_ms:g} ms. Press Ctrl+C to stop."
+    )
+    print("Normal keyboard input is not suppressed.")
+
+    capture_context = _capture_file(args.capture) if args.capture else nullcontext(None)
+    with capture_context as capture, backend.open(selected) as reader:
+
+        def event_sink(event: RawKeyEvent) -> None:
+            if args.diagnostic:
+                _show_raw_event(event)
+            _write_raw_event(capture, event)
+
+        keyer.event_sink = event_sink
+        keyer.run(reader)
 
 
 def _show_raw_event(event: RawKeyEvent) -> None:
