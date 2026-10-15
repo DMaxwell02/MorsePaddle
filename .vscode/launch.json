@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Simulate Morse paddle",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "morse_paddle",
+      "args": [
+        "simulate",
+        "--text",
+        "SOS TEST",
+        "--bounce"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "List HID devices",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "morse_paddle",
+      "args": [
+        "devices"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
+

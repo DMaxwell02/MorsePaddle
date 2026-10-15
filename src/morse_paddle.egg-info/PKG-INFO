@@ -1,0 +1,83 @@
+Metadata-Version: 2.4
+Name: morse-paddle
+Version: 0.1.0
+Summary: Morse Paddle USB interface VBand diagnostics
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: hidapi>=0.14.0.post4
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3; extra == "dev"
+Requires-Dist: ruff>=0.9; extra == "dev"
+
+# Morse Paddle
+
+Morse Paddle USB interface VBand diagnostics.
+
+This Python project captures raw HID reports from a USB paddle interface, records raw and
+debounced paddle transitions, flags likely contact bounce, and translates accepted dit/dah
+events into Morse letters. It can be exercised entirely with simulated input before connecting
+to hardware.
+
+## Quick start
+
+1. Open this folder in VS Code.
+2. Select the `.venv` interpreter if VS Code does not select it automatically.
+3. Run **Terminal: Run Task** → **Simulate bouncing paddle**.
+
+Equivalent terminal commands:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+morse-paddle simulate --text "SOS TEST" --bounce
+pytest
+```
+
+The simulator prints every raw edge, rejected bounce transition, accepted symbol, and decoded
+character. The final line shows the decoded message and bounce count.
+
+## Find and monitor the USB HID interface
+
+List connected HID devices:
+
+```powershell
+morse-paddle devices
+```
+
+Then listen using the interface's hexadecimal vendor and product IDs:
+
+```powershell
+morse-paddle listen --vid 0x1234 --pid 0x5678 --byte-index 0 --dit-mask 0x01 --dah-mask 0x02
+```
+
+The default report mapping treats bit 0 as dit and bit 1 as dah. Adjust `--byte-index`,
+`--dit-mask`, and `--dah-mask` to match the interface. Add `--invert` if the contacts are
+active-low. Use `--capture captures\session.jsonl` to preserve reports for later analysis.
+
+The debounce window defaults to 5 ms. Compare runs with `--debounce-ms 2`, `5`, and `10` to
+measure whether apparent extra events are contact bounce or originate in the USB interface.
+Press `Ctrl+C` to stop capture.
+
+## Project layout
+
+```text
+.vscode/                 VS Code interpreter, launch, task, and extension settings
+captures/                Optional JSON Lines diagnostic captures
+src/morse_paddle/
+  cli.py                  Command-line entry point
+  debounce.py             Per-contact debounce and bounce accounting
+  decoder.py              Morse symbol and character translation
+  hid_source.py           HID enumeration and report capture
+  simulator.py            Repeatable simulated reports, including contact bounce
+tests/                    Unit tests for decoding and debounce behavior
+```
+
+## Diagnostic model
+
+Each HID report is timestamped with `time.perf_counter_ns()`. A transition is accepted only
+after the new electrical state remains stable for the configured debounce window. A transition
+that returns to the accepted state before that window expires is counted as bounce. Accepted
+presses become dots or dashes; elapsed time between presses determines letter and word gaps.
+
+For definitive timing analysis, use a raw capture and confirm the HID report mapping before
+drawing conclusions about the mechanical contacts.
+

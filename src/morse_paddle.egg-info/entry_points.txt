@@ -1,0 +1,2 @@
+[console_scripts]
+morse-paddle = morse_paddle.cli:main
